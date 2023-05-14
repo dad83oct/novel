@@ -1,0 +1,111 @@
+import sqlite3
+
+class NovelRepository:
+    def __init__(self, db_path):
+        self.db_path = db_path
+
+    def create_novel(self, title, genre, summary, status):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO novel (title, genre, summary, status)
+                VALUES (?, ?, ?, ?)
+            """, (title, genre, summary, status))
+            novel_id = cursor.lastrowid
+            conn.commit()
+        return novel_id
+
+    def get_novel(self, novel_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, title, genre, summary, status
+                FROM novel
+                WHERE id = ?
+            """, (novel_id,))
+            row = cursor.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "title": row[1],
+                "genre": row[2],
+                "summary": row[3],
+                "status": row[4]
+            }
+        else:
+            return None
+
+    def update_novel(self, novel_id, title=None, genre=None, summary=None, status=None):
+        updates = []
+        values = []
+        if title is not None:
+            updates.append("title = ?")
+            values.append(title)
+        if genre is not None:
+            updates.append("genre = ?")
+            values.append(genre)
+        if summary is not None:
+            updates.append("summary = ?")
+            values.append(summary)
+        if status is not None:
+            updates.append("status = ?")
+            values.append(status)
+        values.append(novel_id)
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE novel
+                SET {}
+                WHERE id = ?
+            """.format(", ".join(updates)), tuple(values))
+            conn.commit()
+
+    def delete_novel(self, novel_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM novel
+                WHERE id = ?
+            """, (novel_id,))
+            conn.commit()
+
+    def create_character(self, name, description, motivation, backstory, novel_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO character (name, description, motivation, backstory, novel_id)
+                VALUES (?, ?, ?, ?, ?)
+            """, (name, description, motivation, backstory, novel_id))
+            character_id = cursor.lastrowid
+            conn.commit()
+        return character_id
+
+    def get_character(self, character_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, name, description, motivation, backstory, novel_id
+                FROM character
+                WHERE id = ?
+            """, (character_id,))
+            row = cursor.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "name": row[1],
+                "description": row[2],
+                "motivation": row[3],
+                "backstory": row[4],
+                "novel_id": row[5]
+            }
+        else:
+            return None
+
+    def update_character(self, character_id, name=None, description=None, motivation=None, backstory=None):
+        updates = []
+        values = []
+        if name is not None:
+            updates.append("name = ?")
+            values.append(name)
+        if description is not None:
+           
