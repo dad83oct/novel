@@ -1,0 +1,641 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Bot, BookOpen, FileText, Settings, Clipboard, Sparkles, AlertTriangle, CheckCircle, ChevronDown, ChevronUp } from 'lucide-react';
+
+// --- Helper Functions & Constants ---
+const API_MODELS = {
+    text: "mistral-large-latest",
+};
+
+const DEBOUNCE_DELAY = 1000; // 1 second delay for API calls
+
+// --- Main App Component ---
+export default function App() {
+    // --- State Management ---
+    const [apiKey, setApiKey] = useState(() => {
+        // Load API key from localStorage on initial render
+        return localStorage.getItem('mistralApiKey') || '';
+    });
+    const [isKeySaved, setIsKeySaved] = useState(false);
+    const [writingStyle, setWritingStyle] = useState(''); // New state for writing style
+
+    const [currentStep, setCurrentStep] = useState('setup'); // setup, style, idea, writing, done
+    const [isLoading, setIsLoading] = useState(false);
+    const [loadingMessage, setLoadingMessage] = useState('');
+    const [errorMessage, setErrorMessage] = useState('');
+
+    // Novel Data State
+    const [userPrompt, setUserPrompt] = useState('A cozy murder mystery set in a small, quirky bookstore during a blizzard. The detective is the store\'s cat, a witty and observant Maine Coon.');
+    const [novelIdea, setNovelIdea] = useState(null);
+    const [chapterOutline, setChapterOutline] = useState([]);
+    const [generatedChapters, setGeneratedChapters] = useState([]);
+    const [compiledManuscript, setCompiledManuscript] = useState('');
+
+    // UI State
+    const [activeAccordion, setActiveAccordion] = useState(null);
+
+    const apiQueue = useRef([]);
+    const isApiRunning = useRef(false);
+
+    // Save API key to localStorage whenever it changes
+    useEffect(() => {
+        if (apiKey) {
+            localStorage.setItem('mistralApiKey', apiKey);
+        } else {
+            localStorage.removeItem('mistralApiKey');
+        }
+    }, [apiKey]);
+
+    // Load API key from localStorage on initial render
+    useEffect(() => {
+        const savedApiKey = localStorage.getItem('mistralApiKey');
+        if (savedApiKey) {
+            setApiKey(savedApiKey);
+            setIsKeySaved(true);
+            setCurrentStep('style'); // Now goes to style step after API key is saved
+        }
+    }, []);
+
+    // --- File Upload Handler ---
+    const handleFileUpload = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+
+        // For text files
+        if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+            if (file.size > 1000000) { // 1MB limit
+                setErrorMessage('File size exceeds 1MB limit');
+                return;
+            }
+            reader.onload = (event) => {
+                setWritingStyle(event.target.result.substring(0, 5000)); // Limit to 5000 chars
+                setCurrentStep('idea'); // Auto-advance to next step after successful upload
+            };
+            reader.readAsText(file);
+        } else {
+            setErrorMessage('Please upload a plain text file (.txt)');
+        }
+    };
+
+    // --- API Call Functions ---
+
+    // Generic API call handler for Mistral AI
+    const makeApiCall = useCallback(async (model, messages, jsonResponse = false) => {
+        if (!apiKey) {
+            throw new Error("API Key is not set. Please enter your Mistral AI API key in the settings.");
+        }
+
+        const endpoint = 'https://api.mistral.ai/v1/chat/completions';
+
+        const body = {
+            model: model,
+            messages: messages,
+        };
+
+        if (jsonResponse) {
+            body.response_format = { "type": "json_object" };
+        }
+
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify(body),
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(`API Error: ${errorData.message || 'An unknown error occurred'}`);
+        }
+
+        return response.json();
+    }, [apiKey]);
+
+    // Function to parse AI's JSON response safely
+    const parseJsonResponse = (result, taskName) => {
+        try {
+            if (!result.choices || !result.choices[0] || !result.choices[0].message || !result.choices[0].message.content) {
+                 throw new Error("Invalid response structure from AI.");
+            }
+            const content = result.choices[0].message.content;
+            return JSON.parse(content);
+        } catch (e) {
+            console.error(`Failed to parse JSON during ${taskName}:`, e);
+            console.error("Malformed AI response:", result?.choices?.[0]?.message?.content);
+            throw new Error(`AI returned malformed data for ${taskName}. Please try again.`);
+        }
+    };
+
+    // Function to generate the initial novel idea
+    const generateNovelIdea = async () => {
+        const prompt = `
+            You are a brilliant murder mystery novel ideator. Based on the user's high-level idea, generate the core details for a compelling novel.
+            Return the output as a single, minified JSON object with these exact keys: "novelTitle", "subgenre", "detective", "victim", "suspects" (an array of 3-5 strings), "murderMethod", "keyClue", and "premise".
+            User Idea: "${userPrompt}"
+        `;
+        const messages = [{ role: "user", content: prompt }];
+        const result = await makeApiCall(API_MODELS.text, messages, true);
+        return parseJsonResponse(result, "Novel Idea Generation");
+    };
+
+    // Function to generate the chapter outline
+    const generateOutline = async (idea) => {
+        const prompt = `
+            You are a master plotter for murder mystery novels. Generate a detailed chapter outline of 23-25 chapters for the following novel idea.
+            The output MUST be a single, minified JSON array. Each object in the array represents a chapter and must have these exact keys: "chapterNumber", "chapterTitle", "chapterSummary", "plotPoints" (array of strings), "cluesIntroduced" (array of strings), "suspectsFeatured" (array of strings), and "redHerringsPlanted" (array of strings).
+
+            Novel Details:
+            Title: ${idea.novelTitle}
+            Subgenre: ${idea.subgenre}
+            Detective: ${idea.detective}
+            Victim: ${idea.victim}
+            Suspects: ${Array.isArray(idea.suspects) ? idea.suspects.join(', ') : ''}
+            Premise: ${idea.premise}
+        `;
+        const messages = [{ role: "user", content: prompt }];
+        const result = await makeApiCall(API_MODELS.text, messages, true);
+        return parseJsonResponse(result, "Chapter Outline Generation");
+    };
+
+    // Function to write a single chapter (updated to include writing style)
+    const writeChapter = async (idea, chapterInfo) => {
+        const prompt = `
+            You are a master of ${idea.subgenre} fiction. Write a chapter in a style similar to the following sample text.
+
+            ===== WRITING STYLE GUIDE =====
+            ${writingStyle.substring(0, 1000)}  // Use first 1000 chars to avoid prompt overload
+
+            ===== CHAPTER INSTRUCTIONS =====
+            Write a suspenseful and well-paced chapter based on the provided outline. The chapter should be between 1000-1500 words.
+            Focus on building tension, the detective's process, character motives, and dialogue.
+            Match the tone, pacing, and style of the provided writing sample as closely as possible.
+
+            Novel Context:
+            Title: ${idea.novelTitle}
+            Detective: ${idea.detective}
+            Premise: ${idea.premise}
+
+            Chapter Details:
+            Number: ${chapterInfo.chapterNumber}
+            Title: ${chapterInfo.chapterTitle}
+            Summary: ${chapterInfo.chapterSummary}
+            Key Plot Points: ${Array.isArray(chapterInfo.plotPoints) ? chapterInfo.plotPoints.join('; ') : ''}
+            Clues to Introduce: ${Array.isArray(chapterInfo.cluesIntroduced) ? chapterInfo.cluesIntroduced.join('; ') : ''}
+            Suspects Featured: ${Array.isArray(chapterInfo.suspectsFeatured) ? chapterInfo.suspectsFeatured.join('; ') : ''}
+            Red Herrings: ${Array.isArray(chapterInfo.redHerringsPlanted) ? chapterInfo.redHerringsPlanted.join('; ') : ''}
+
+            Write the full chapter text now.
+        `;
+        const messages = [{ role: "user", content: prompt }];
+        const result = await makeApiCall(API_MODELS.text, messages);
+        return result.choices[0].message.content;
+    };
+
+    // Function to critique a chapter
+    const critiqueChapter = async (chapterText, chapterInfo) => {
+        const prompt = `
+            You are a sharp developmental editor specializing in murder mystery fiction. Provide a concise, constructive critique of the following chapter based on the author's goals.
+            Structure your feedback using Markdown with these headings: ### Overall Assessment, ### Strengths, ### Areas for Improvement, ### Consistency Check, and ### Mystery Effectiveness Score (1-10).
+
+            Author's Goals:
+            Summary: ${chapterInfo.chapterSummary}
+            Plot Points: ${Array.isArray(chapterInfo.plotPoints) ? chapterInfo.plotPoints.join('; ') : ''}
+            Clues: ${Array.isArray(chapterInfo.cluesIntroduced) ? chapterInfo.cluesIntroduced.join('; ') : ''}
+            Suspects: ${Array.isArray(chapterInfo.suspectsFeatured) ? chapterInfo.suspectsFeatured.join('; ') : ''}
+            Red Herrings: ${Array.isArray(chapterInfo.redHerringsPlanted) ? chapterInfo.redHerringsPlanted.join('; ') : ''}
+
+            Chapter Text to Critique:
+            ${chapterText}
+        `;
+        const messages = [{ role: "user", content: prompt }];
+        const result = await makeApiCall(API_MODELS.text, messages);
+        return result.choices[0].message.content;
+    };
+
+    // --- API Queue Processor ---
+    const processApiQueue = useCallback(async () => {
+        if (isApiRunning.current || apiQueue.current.length === 0) {
+            return;
+        }
+        isApiRunning.current = true;
+
+        const { task, onComplete, onError } = apiQueue.current.shift();
+
+        try {
+            const result = await task();
+            onComplete(result);
+        } catch (error) {
+            onError(error);
+        } finally {
+            isApiRunning.current = false;
+        }
+    }, []);
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            if (!isApiRunning.current && apiQueue.current.length > 0) {
+                processApiQueue();
+            }
+        }, DEBOUNCE_DELAY);
+        return () => clearInterval(interval);
+    }, [processApiQueue]);
+
+    const addToQueue = (task) => {
+        return new Promise((resolve, reject) => {
+            apiQueue.current.push({ task, onComplete: resolve, onError: reject });
+        });
+    };
+
+    // --- Workflow Handlers ---
+
+    const handleGenerateIdea = async () => {
+        if (!userPrompt) {
+            setErrorMessage("Please enter a high-level idea for your novel.");
+            return;
+        }
+        setIsLoading(true);
+        setErrorMessage('');
+        setLoadingMessage('Generating novel concept...');
+
+        try {
+            const idea = await addToQueue(generateNovelIdea);
+            setNovelIdea(idea);
+            setLoadingMessage('Novel concept created! Ready to build the outline.');
+            // No need to set step here, as we are already on the 'idea' step.
+        } catch (error) {
+            setErrorMessage(`Failed to generate idea: ${error.message}`);
+            // BUG FIX: Do not change the current step on error. The user should
+            // stay on the 'idea' screen to see the error and retry.
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const handleWriteNovel = async () => {
+        setIsLoading(true);
+        setErrorMessage('');
+        setGeneratedChapters([]);
+
+        try {
+            setLoadingMessage('Generating full chapter outline...');
+            const outline = await addToQueue(() => generateOutline(novelIdea));
+            setChapterOutline(outline);
+            setCurrentStep('writing');
+
+            for (const chapterInfo of outline) {
+                setLoadingMessage(`[${chapterInfo.chapterNumber}/${outline.length}] Writing chapter: "${chapterInfo.chapterTitle}"`);
+                const chapterText = await addToQueue(() => writeChapter(novelIdea, chapterInfo));
+
+                setLoadingMessage(`[${chapterInfo.chapterNumber}/${outline.length}] Critiquing chapter...`);
+                const critiqueText = await addToQueue(() => critiqueChapter(chapterText, chapterInfo));
+
+                setGeneratedChapters(prev => [...prev, {
+                    ...chapterInfo,
+                    text: chapterText,
+                    critique: critiqueText,
+                }]);
+            }
+
+            setLoadingMessage('Novel generation complete!');
+            setCurrentStep('done');
+
+        } catch (error) {
+            setErrorMessage(`An error occurred during novel generation: ${error.message}`);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (currentStep === 'done' && generatedChapters.length > 0 && chapterOutline.length === generatedChapters.length) {
+            const fullText = generatedChapters
+                .sort((a, b) => a.chapterNumber - b.chapterNumber)
+                .map(ch => `## Chapter ${ch.chapterNumber}: ${ch.chapterTitle}\n\n${ch.text}`)
+                .join('\n\n---\n\n');
+            setCompiledManuscript(fullText);
+        }
+    }, [currentStep, generatedChapters, chapterOutline]);
+
+    // --- UI Components ---
+
+    const AccordionItem = ({ index, title, children }) => {
+        const isOpen = activeAccordion === index;
+        return (
+            <div className="border border-slate-700 rounded-lg mb-2 bg-slate-800/50">
+                <button
+                    className="w-full flex justify-between items-center p-4 text-left font-semibold text-slate-200"
+                    onClick={() => setActiveAccordion(isOpen ? null : index)}
+                >
+                    <span>{title}</span>
+                    {isOpen ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+                </button>
+                {isOpen && <div className="p-4 border-t border-slate-700">{children}</div>}
+            </div>
+        );
+    };
+
+    const CopyButton = ({ textToCopy, disabled = false }) => {
+        const [copied, setCopied] = useState(false);
+        const handleCopy = () => {
+            const textarea = document.createElement('textarea');
+            textarea.value = textToCopy;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        };
+
+        return (
+            <button
+                onClick={handleCopy}
+                disabled={disabled || !textToCopy}
+                className={`ml-2 px-3 py-1 text-sm rounded-md transition-all flex items-center gap-2 ${
+                    copied
+                        ? 'bg-green-600 text-white'
+                        : 'bg-slate-600 hover:bg-slate-500 text-slate-200 disabled:bg-slate-700 disabled:cursor-not-allowed'
+                }`}
+            >
+                {copied ? <CheckCircle size={16} /> : <Clipboard size={16} />}
+                {copied ? 'Copied!' : 'Copy'}
+            </button>
+        );
+    };
+
+    const formatCritique = (critiqueText) => {
+        if (!critiqueText) return '';
+        return critiqueText
+            .replace(/### (.*)/g, '<strong>$1</strong>')
+            .replace(/\n/g, '<br />');
+    };
+
+    const renderSetupStep = () => (
+        <div className="bg-slate-800/50 p-6 rounded-lg shadow-lg">
+            <h2 className="text-2xl font-bold text-teal-300 mb-4 flex items-center gap-2"><Settings /> Setup</h2>
+            <p className="text-slate-400 mb-4">Enter your Mistral AI API key to begin. You can get one from the Mistral AI platform.</p>
+            <div className="flex items-center">
+                <input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="Enter your Mistral AI API Key"
+                    className="flex-grow p-2 rounded-l-md bg-slate-700 border border-slate-600 text-slate-200 focus:outline-none focus:ring-2 focus:ring-teal-400"
+                />
+                <button
+                    onClick={() => {
+                        setIsKeySaved(true);
+                        setCurrentStep('style'); // Now goes to style step
+                    }}
+                    disabled={!apiKey}
+                    className="bg-teal-600 text-white px-4 py-2 rounded-r-md hover:bg-teal-500 disabled:bg-slate-600 disabled:cursor-not-allowed"
+                >
+                    Save Key
+                </button>
+            </div>
+            {isKeySaved && <p className="text-green-400 mt-2 flex items-center gap-2"><CheckCircle size={16} /> API Key saved!</p>}
+        </div>
+    );
+
+    // New style input step component
+    const renderStyleStep = () => (
+        <div className="bg-slate-800/50 p-6 rounded-lg shadow-lg space-y-6">
+            <div>
+                <h2 className="text-2xl font-bold text-teal-300 mb-4 flex items-center gap-2">
+                    <FileText /> 1. Upload Your Writing Style
+                </h2>
+                <p className="text-slate-400 mb-4">
+                    Upload a sample of your writing (as a .txt file) to help the AI match your style.
+                    This will make the generated chapters sound more like your own writing.
+                </p>
+            </div>
+
+            <div className="space-y-4">
+                <div className="border-2 border-dashed border-slate-600 rounded-lg p-6 text-center">
+                    <input
+                        type="file"
+                        accept=".txt"
+                        onChange={handleFileUpload}
+                        className="hidden"
+                        id="style-file-upload"
+                    />
+                    <label htmlFor="style-file-upload" className="cursor-pointer">
+                        <div className="text-teal-400 mb-2">
+                            <FileText size={48} className="mx-auto" />
+                        </div>
+                        <p className="text-slate-300 font-medium">
+                            Click to upload a text file (.txt)
+                        </p>
+                        <p className="text-slate-500 text-sm mt-1">
+                            Maximum file size: 1MB
+                        </p>
+                    </label>
+                </div>
+
+                {writingStyle && (
+                    <div>
+                        <h3 className="text-lg font-semibold mb-2">Preview of Uploaded Style:</h3>
+                        <div className="bg-slate-900/70 p-4 rounded-md h-64 overflow-y-auto">
+                            {writingStyle.substring(0, 1000)}...
+                        </div>
+                    </div>
+                )}
+
+                <div className="text-slate-400 text-sm">
+                    <p className="mb-2">Don't have a file? You can paste your text below:</p>
+                    <textarea
+                        placeholder="Or paste your writing sample here (up to 5000 characters)..."
+                        className="w-full p-2 rounded-md bg-slate-700 border border-slate-600 text-slate-200 h-40 focus:outline-none focus:ring-2 focus:ring-teal-400"
+                        value={writingStyle}
+                        onChange={(e) => setWritingStyle(e.target.value.substring(0, 5000))}
+                    />
+                </div>
+
+                <button
+                    onClick={() => setCurrentStep('idea')}
+                    disabled={!writingStyle}
+                    className="w-full bg-teal-600 text-white px-4 py-3 rounded-md hover:bg-teal-500 disabled:bg-slate-600 disabled:cursor-not-allowed font-bold text-lg"
+                >
+                    2. Continue to Novel Idea
+                </button>
+            </div>
+        </div>
+    );
+
+    const renderIdeaStep = () => (
+        <div className="space-y-6">
+            <div className="bg-slate-800/50 p-6 rounded-lg shadow-lg">
+                <h2 className="text-2xl font-bold text-teal-300 mb-4 flex items-center gap-2"><Sparkles /> 2. Generate Novel Idea</h2>
+                <p className="text-slate-400 mb-4">Start with a high-level concept for your murder mystery. The AI will flesh out the core details.</p>
+                <textarea
+                    value={userPrompt}
+                    onChange={(e) => setUserPrompt(e.target.value)}
+                    placeholder="e.g., A cozy murder mystery set in a small, quirky bookstore during a blizzard. The detective is the store's cat, a witty and observant Maine Coon."
+                    className="w-full p-2 rounded-md bg-slate-700 border border-slate-600 text-slate-200 h-24 focus:outline-none focus:ring-2 focus:ring-teal-400"
+                />
+                <button
+                    onClick={handleGenerateIdea}
+                    disabled={isLoading || !isKeySaved}
+                    className="mt-4 w-full bg-teal-600 text-white px-4 py-3 rounded-md hover:bg-teal-500 disabled:bg-slate-600 disabled:cursor-not-allowed font-bold text-lg"
+                >
+                    Generate Idea
+                </button>
+            </div>
+
+            {novelIdea && (
+                 <div className="bg-slate-800/50 p-6 rounded-lg shadow-lg animate-fade-in">
+                    <h3 className="text-xl font-bold text-teal-300 mb-4">Generated Novel Concept</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-slate-300">
+                        <p><strong>Title:</strong> {novelIdea.novelTitle}</p>
+                        <p><strong>Subgenre:</strong> {novelIdea.subgenre}</p>
+                        <p className="md:col-span-2"><strong>Detective:</strong> {novelIdea.detective}</p>
+                        <p className="md:col-span-2"><strong>Victim:</strong> {novelIdea.victim}</p>
+                        <p className="md:col-span-2"><strong>Murder Method:</strong> {novelIdea.murderMethod}</p>
+                        <p className="md:col-span-2"><strong>Key Clue:</strong> {novelIdea.keyClue}</p>
+                        <div className="md:col-span-2">
+                            <strong>Suspects:</strong>
+                            <ul className="list-disc list-inside ml-4">
+                                {Array.isArray(novelIdea.suspects) && novelIdea.suspects.map((s, i) => <li key={i}>{s}</li>)}
+                            </ul>
+                        </div>
+                        <p className="md:col-span-2"><strong>Premise:</strong> {novelIdea.premise}</p>
+                    </div>
+                    <button
+                        onClick={handleWriteNovel}
+                        disabled={isLoading}
+                        className="mt-6 w-full bg-indigo-600 text-white px-4 py-3 rounded-md hover:bg-indigo-500 disabled:bg-slate-600 disabled:cursor-not-allowed font-bold text-lg"
+                    >
+                        3. Write Full Novel
+                    </button>
+                 </div>
+            )}
+        </div>
+    );
+
+    const renderWritingStep = () => (
+         <div className="space-y-6">
+            <h2 className="text-2xl font-bold text-teal-300 mb-4 flex items-center gap-2 animate-pulse"><Bot /> Writing in Progress...</h2>
+            {generatedChapters.map((chapter, index) => (
+                <AccordionItem key={index} index={index} title={`Chapter ${chapter.chapterNumber}: ${chapter.chapterTitle}`}>
+                    <div className="space-y-4 text-slate-300">
+                        <div>
+                            <h4 className="font-bold text-teal-400 flex items-center justify-between">
+                                Chapter Text
+                                <CopyButton textToCopy={chapter.text} />
+                            </h4>
+                            <div className="mt-2 p-3 bg-slate-900/70 rounded-md max-h-60 overflow-y-auto whitespace-pre-wrap">{chapter.text}</div>
+                        </div>
+                        <div>
+                            <h4 className="font-bold text-teal-400 flex items-center justify-between">
+                                Editor's Critique
+                                <CopyButton textToCopy={chapter.critique} />
+                            </h4>
+                            <div className="mt-2 p-3 bg-slate-900/70 rounded-md max-h-60 overflow-y-auto" dangerouslySetInnerHTML={{ __html: formatCritique(chapter.critique) }} />
+                        </div>
+                    </div>
+                </AccordionItem>
+            ))}
+        </div>
+    );
+
+    const renderDoneStep = () => (
+        <div className="space-y-6">
+            <h2 className="text-2xl font-bold text-green-400 mb-4 flex items-center gap-2"><CheckCircle /> Novel Generation Complete!</h2>
+
+            <div className="bg-slate-800/50 p-6 rounded-lg shadow-lg">
+                <h3 className="text-xl font-bold text-teal-300 mb-4 flex items-center justify-between">
+                    Compiled Manuscript
+                    <CopyButton textToCopy={compiledManuscript}/>
+                </h3>
+                <textarea
+                    readOnly
+                    value={compiledManuscript}
+                    className="w-full p-2 rounded-md bg-slate-900/70 border border-slate-700 text-slate-300 h-96 focus:outline-none focus:ring-2 focus:ring-teal-400"
+                />
+            </div>
+
+            <div>
+                 <h3 className="text-xl font-bold text-teal-300 mb-4">All Chapters</h3>
+                 {generatedChapters.map((chapter, index) => (
+                    <AccordionItem key={index} index={index} title={`Chapter ${chapter.chapterNumber}: ${chapter.chapterTitle}`}>
+                         <div className="space-y-4 text-slate-300">
+                            <div>
+                                <h4 className="font-bold text-teal-400">Chapter Text</h4>
+                                <div className="mt-2 p-3 bg-slate-900/70 rounded-md max-h-60 overflow-y-auto whitespace-pre-wrap">{chapter.text}</div>
+                            </div>
+                            <div>
+                                <h4 className="font-bold text-teal-400">Editor's Critique</h4>
+                                <div className="mt-2 p-3 bg-slate-900/70 rounded-md max-h-60 overflow-y-auto" dangerouslySetInnerHTML={{ __html: formatCritique(chapter.critique) }} />
+                            </div>
+                        </div>
+                    </AccordionItem>
+                 ))}
+            </div>
+             <button
+                onClick={() => {
+                    setCurrentStep('setup');
+                    setNovelIdea(null);
+                    setChapterOutline([]);
+                    setGeneratedChapters([]);
+                    setCompiledManuscript('');
+                    setIsKeySaved(false);
+                    setApiKey('');
+                    setWritingStyle(''); // Reset writing style
+                    localStorage.removeItem('mistralApiKey');
+                }}
+                className="mt-4 w-full bg-red-600 text-white px-4 py-3 rounded-md hover:bg-red-500 font-bold text-lg"
+            >
+                Start a New Novel
+            </button>
+        </div>
+    );
+
+    return (
+        <div className="bg-slate-900 text-white min-h-screen font-sans">
+            <div className="container mx-auto p-4 md:p-8">
+                <header className="text-center mb-8">
+                    <h1 className="text-4xl md:text-5xl font-bold text-teal-300 flex items-center justify-center gap-3">
+                        <BookOpen size={48} /> Novel Weaver
+                    </h1>
+                    <p className="text-slate-400 mt-2">Your AI-powered partner for writing murder mystery novels.</p>
+                </header>
+
+                <main>
+                    {currentStep === 'setup' && renderSetupStep()}
+                    {currentStep === 'style' && renderStyleStep()}
+                    {currentStep === 'idea' && renderIdeaStep()}
+                    {(currentStep === 'writing' || currentStep === 'done') && novelIdea && (
+                        <div className="bg-slate-800/50 p-4 rounded-lg shadow-inner mb-6">
+                             <h3 className="text-lg font-bold text-teal-300">{novelIdea.novelTitle}</h3>
+                             <p className="text-sm text-slate-400 italic">{novelIdea.subgenre}</p>
+                        </div>
+                    )}
+                    {currentStep === 'writing' && renderWritingStep()}
+                    {currentStep === 'done' && renderDoneStep()}
+
+                    {isLoading && (
+                        <div className="fixed inset-0 bg-black/60 flex flex-col items-center justify-center z-50">
+                            <Bot size={64} className="text-teal-400 animate-bounce" />
+                            <p className="text-xl mt-4 text-white">{loadingMessage}</p>
+                        </div>
+                    )}
+
+                    {errorMessage && (
+                        <div className="fixed bottom-4 right-4 bg-red-800/90 text-white p-4 rounded-lg shadow-xl flex items-center gap-3">
+                           <AlertTriangle size={24} />
+                           <div>
+                                <p className="font-bold">Error</p>
+                                <p>{errorMessage}</p>
+                           </div>
+                           <button onClick={() => setErrorMessage('')} className="ml-4 text-2xl font-bold">&times;</button>
+                        </div>
+                    )}
+                </main>
+            </div>
+        </div>
+    );
+}
